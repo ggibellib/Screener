@@ -4,7 +4,6 @@ Screener personalizado — dashboard estático de una sola pantalla
 Autor: generado con Claude
 """
 
-import re
 import streamlit as st
 import yfinance as yf
 import requests
@@ -35,19 +34,21 @@ COMMODITY_TICKERS = {
     "BZ=F": "Brent (petróleo)",
     "GC=F": "Oro",
     "SI=F": "Plata",
-    "ZS=F": "Soja",
-    "ZW=F": "Trigo",
-    "ZC=F": "Maíz",
+    "ZS=F": "Soja (USD/tonelada)",
+    "ZW=F": "Trigo (USD/tonelada)",
+    "ZC=F": "Maíz (USD/tonelada)",
+}
+
+# Los futuros de granos en CBOT cotizan en centavos de USD por bushel.
+# Factor = bushels por tonelada métrica (según el peso estándar del bushel
+# para cada grano), para convertir a USD/tonelada.
+GRAIN_USD_PER_TONNE_FACTOR = {
+    "ZS=F": 36.7437,  # soja: bushel = 60 lb
+    "ZW=F": 36.7437,  # trigo: bushel = 60 lb
+    "ZC=F": 39.3679,  # maíz: bushel = 56 lb
 }
 
 NOAL_TICKER = "NOAL.V"  # NOA Lithium Brines, TSXV
-
-# Litio: Trading Economics publica el carbonato de litio en CNY/tonelada y,
-# a diferencia de SMM, esta página SÍ es scrapeable con un pedido simple
-# (el precio viene embebido en el HTML/meta-description, no se carga con JS).
-# Lo convertimos a USD con el tipo de cambio spot USD/CNY (ticker CNY=X).
-TE_LITHIUM_URL = "https://tradingeconomics.com/commodity/lithium"
-CNY_FX_TICKER = "CNY=X"
 
 MEP_API_URL = "https://dolarapi.com/v1/ambito/dolares/bolsa"
 RIESGO_PAIS_API_URL = "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais"
@@ -133,47 +134,6 @@ def get_riesgo_pais() -> dict:
         return {"Ticker": "RP", "Nombre": "Riesgo País (no disponible)", "Precio": None, "Variación %": None}
 
 
-@st.cache_data(ttl=CACHE_TTL)
-def get_lithium_carbonate_te(fx_rate: float | None) -> dict:
-    """Carbonato de litio (Trading Economics, CNY/T) convertido a USD/T con
-    el tipo de cambio spot USD/CNY. TE no tiene una API pública gratuita
-    (la real requiere suscripción paga), así que esto es scraping de su
-    página web. A diferencia de SMM, esta página sí trae el precio embebido
-    en el HTML plano (no se carga vía JavaScript), así que un pedido simple
-    debería funcionar — pero sigue siendo scraping, y por ende más frágil
-    que una API: si Trading Economics cambia el formato de esa frase, esto
-    puede dejar de andar."""
-    base = {"Ticker": "LI2CO3", "Nombre": "Litio Carbonato (Trading Economics, CNY→USD)"}
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-        }
-        r = requests.get(TE_LITHIUM_URL, headers=headers, timeout=15)
-        r.raise_for_status()
-
-        # Ej: "Lithium fell to 163,000 CNY/T on June 5, 2026, down 3.12% from
-        # the previous day." -> agarramos precio, dirección y variación %.
-        m = re.search(
-            r"Lithium\s+.+?\s+to\s+([\d,]+(?:\.\d+)?)\s*CNY/T on [^,]+,\s*(up|down)\s+([\d.]+)%",
-            r.text,
-        )
-        if not m:
-            return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
-
-        price_cny = float(m.group(1).replace(",", ""))
-        pct = float(m.group(3))
-        pct_signed = pct if m.group(2) == "up" else -pct
-
-        if not fx_rate:
-            return {**base, "Nombre": f"Litio Carbonato (CNY {price_cny:,.0f}/T, sin tipo de cambio)", "Precio": None, "Variación %": pct_signed}
-
-        price_usd = price_cny / fx_rate
-        return {**base, "Precio": price_usd, "Variación %": pct_signed}
-    except Exception:
-        return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
 
 
 # ----------------------------------------------------------------------------
@@ -249,6 +209,18 @@ def render_card(icon: str, title: str, accent: str, rows: list[dict]):
     st.markdown(html, unsafe_allow_html=True)
 
 
+def apply_grain_conversion(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte los precios de ZS=F/ZW=F/ZC=F de centavos/bushel a
+    USD/tonelada. La Variación % no cambia (es una razón, no depende de
+    la unidad)."""
+    df = df.copy()
+    for ticker, factor in GRAIN_USD_PER_TONNE_FACTOR.items():
+        mask = df["Ticker"] == ticker
+        if mask.any() and df.loc[mask, "Precio"].notna().all():
+            df.loc[mask, "Precio"] = (df.loc[mask, "Precio"] / 100) * factor
+    return df
+
+
 # ----------------------------------------------------------------------------
 # HEADER
 # ----------------------------------------------------------------------------
@@ -272,14 +244,9 @@ fx_rows = [get_mep(), get_riesgo_pais()]
 df_ar = get_yf_data(AR_TICKERS)
 df_us = get_yf_data(US_TICKERS, labels=US_LABELS)
 df_crypto = get_yf_data(CRYPTO_TICKERS)
-df_comm = get_yf_data(list(COMMODITY_TICKERS.keys()), labels=COMMODITY_TICKERS)
+df_comm = apply_grain_conversion(get_yf_data(list(COMMODITY_TICKERS.keys()), labels=COMMODITY_TICKERS))
 
-df_noal_fx = get_yf_data([NOAL_TICKER, CNY_FX_TICKER], labels={CNY_FX_TICKER: "USD/CNY"})
-noal_row = df_noal_fx[df_noal_fx["Ticker"] == NOAL_TICKER].to_dict("records")
-fx_cny_row = df_noal_fx[df_noal_fx["Ticker"] == CNY_FX_TICKER]
-fx_cny_rate = fx_cny_row.iloc[0]["Precio"] if not fx_cny_row.empty else None
-
-lithium_rows = [get_lithium_carbonate_te(fx_cny_rate)] + noal_row
+df_noal = get_yf_data([NOAL_TICKER])
 
 # ----------------------------------------------------------------------------
 # LAYOUT: 3 columnas
@@ -289,7 +256,7 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     render_card("🛢️", "COMMODITIES", "#f59e0b", df_comm.to_dict("records"))
-    render_card("⚡", "LITIO", "#a78bfa", lithium_rows)
+    render_card("⚡", "LITIO", "#a78bfa", df_noal.to_dict("records"))
 
 with col2:
     render_card("📈", "ACCIONES ARGENTINAS (ADRs)", "#22c55e", df_ar.to_dict("records"))
