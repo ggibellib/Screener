@@ -10,7 +10,6 @@ import yfinance as yf
 import requests
 import pandas as pd
 from datetime import datetime
-from bs4 import BeautifulSoup
 
 st.set_page_config(
     page_title="Screener de Activos Financieros",
@@ -43,9 +42,15 @@ COMMODITY_TICKERS = {
 
 NOAL_TICKER = "NOAL.V"  # NOA Lithium Brines, TSXV
 
+# Litio: Trading Economics publica el carbonato de litio en CNY/tonelada y,
+# a diferencia de SMM, esta página SÍ es scrapeable con un pedido simple
+# (el precio viene embebido en el HTML/meta-description, no se carga con JS).
+# Lo convertimos a USD con el tipo de cambio spot USD/CNY (ticker CNY=X).
+TE_LITHIUM_URL = "https://tradingeconomics.com/commodity/lithium"
+CNY_FX_TICKER = "CNY=X"
+
 MEP_API_URL = "https://dolarapi.com/v1/ambito/dolares/bolsa"
 RIESGO_PAIS_API_URL = "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais"
-SMM_LITHIUM_URL = "https://www.metal.com/en/prices/202212050001"  # SMM Battery-Grade Li2CO3 Index, USD/mt
 
 # ----------------------------------------------------------------------------
 # FORMATO NUMÉRICO (es-AR: punto de miles, coma decimal)
@@ -129,11 +134,16 @@ def get_riesgo_pais() -> dict:
 
 
 @st.cache_data(ttl=CACHE_TTL)
-def get_lithium_carbonate() -> dict:
-    """Precio del carbonato de litio (SMM Battery-Grade Li2CO3 Index, USD/mt),
-    scrapeado de Shanghai Metal Market. Frágil por naturaleza (depende de que
-    SMM no cambie el HTML de la página ni bloquee el request)."""
-    base = {"Ticker": "LI2CO3", "Nombre": "Litio Carbonato (SMM Battery-Grade, USD/mt)"}
+def get_lithium_carbonate_te(fx_rate: float | None) -> dict:
+    """Carbonato de litio (Trading Economics, CNY/T) convertido a USD/T con
+    el tipo de cambio spot USD/CNY. TE no tiene una API pública gratuita
+    (la real requiere suscripción paga), así que esto es scraping de su
+    página web. A diferencia de SMM, esta página sí trae el precio embebido
+    en el HTML plano (no se carga vía JavaScript), así que un pedido simple
+    debería funcionar — pero sigue siendo scraping, y por ende más frágil
+    que una API: si Trading Economics cambia el formato de esa frase, esto
+    puede dejar de andar."""
+    base = {"Ticker": "LI2CO3", "Nombre": "Litio Carbonato (Trading Economics, CNY→USD)"}
     try:
         headers = {
             "User-Agent": (
@@ -141,25 +151,27 @@ def get_lithium_carbonate() -> dict:
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             )
         }
-        r = requests.get(SMM_LITHIUM_URL, headers=headers, timeout=15)
+        r = requests.get(TE_LITHIUM_URL, headers=headers, timeout=15)
         r.raise_for_status()
-        text = BeautifulSoup(r.text, "html.parser").get_text(separator=" ")
-        text = re.sub(r"\s+", " ", text)
 
-        patterns = [
-            r"VAT excluded[^\d]{0,20}([\d,]+\.\d+)[^\d]{0,20}USD/mt[^\d\+\-]{0,20}([+-][\d,]+\.\d+)\(([+-]?[\d.]+)%\)",
-            r"Li₂CO₃\s*[≥>=]*\s*99\.5%\s*([\d,]+\.\d+)\s*[+-][\d,\.]+\s*\(([+-]?[\d.]+)%\)",
-            r"SMM Battery-Grade Lithium Carbonate Index[^\d]{0,60}([\d,]+\.\d+)[^\(]{0,20}\(([+-]?[\d.]+)%\)",
-        ]
-        for pat in patterns:
-            m = re.search(pat, text)
-            if m:
-                groups = m.groups()
-                price = float(groups[0].replace(",", ""))
-                pct = float(groups[-1])
-                return {**base, "Precio": price, "Variación %": pct}
+        # Ej: "Lithium fell to 163,000 CNY/T on June 5, 2026, down 3.12% from
+        # the previous day." -> agarramos precio, dirección y variación %.
+        m = re.search(
+            r"Lithium\s+.+?\s+to\s+([\d,]+(?:\.\d+)?)\s*CNY/T on [^,]+,\s*(up|down)\s+([\d.]+)%",
+            r.text,
+        )
+        if not m:
+            return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
 
-        return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
+        price_cny = float(m.group(1).replace(",", ""))
+        pct = float(m.group(3))
+        pct_signed = pct if m.group(2) == "up" else -pct
+
+        if not fx_rate:
+            return {**base, "Nombre": f"Litio Carbonato (CNY {price_cny:,.0f}/T, sin tipo de cambio)", "Precio": None, "Variación %": pct_signed}
+
+        price_usd = price_cny / fx_rate
+        return {**base, "Precio": price_usd, "Variación %": pct_signed}
     except Exception:
         return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
 
@@ -262,8 +274,12 @@ df_us = get_yf_data(US_TICKERS, labels=US_LABELS)
 df_crypto = get_yf_data(CRYPTO_TICKERS)
 df_comm = get_yf_data(list(COMMODITY_TICKERS.keys()), labels=COMMODITY_TICKERS)
 
-df_noal = get_yf_data([NOAL_TICKER])
-lithium_rows = [get_lithium_carbonate()] + df_noal.to_dict("records")
+df_noal_fx = get_yf_data([NOAL_TICKER, CNY_FX_TICKER], labels={CNY_FX_TICKER: "USD/CNY"})
+noal_row = df_noal_fx[df_noal_fx["Ticker"] == NOAL_TICKER].to_dict("records")
+fx_cny_row = df_noal_fx[df_noal_fx["Ticker"] == CNY_FX_TICKER]
+fx_cny_rate = fx_cny_row.iloc[0]["Precio"] if not fx_cny_row.empty else None
+
+lithium_rows = [get_lithium_carbonate_te(fx_cny_rate)] + noal_row
 
 # ----------------------------------------------------------------------------
 # LAYOUT: 3 columnas
