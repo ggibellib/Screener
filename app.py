@@ -20,11 +20,7 @@ st.set_page_config(
 # CONFIG
 # ----------------------------------------------------------------------------
 
-# Auto-refresh: recarga toda la página cada N segundos (300 = 5 min).
-# Si lo bajás a 60 (1 min), bajá también el ttl del cache más abajo,
-# y tené en cuenta que refrescar muy seguido puede pegarle demasiado
-# a Yahoo Finance y hacer que empiece a devolver errores de rate-limit.
-REFRESH_SECONDS = 300
+REFRESH_SECONDS = 300  # auto-recarga de página. Bajalo a 60 para 1 min (ver nota abajo)
 CACHE_TTL = 300
 
 AR_TICKERS = ["GGAL", "BMA", "BBAR", "YPF", "VIST", "CRESY"]  # ADRs en NYSE/NASDAQ
@@ -38,10 +34,16 @@ COMMODITY_TICKERS = {
     "BZ=F": "Brent (petróleo)",
     "GC=F": "Oro",
     "SI=F": "Plata",
-    "LIT": "Litio (ETF Global X Lithium)",
     "ZS=F": "Soja",
     "ZW=F": "Trigo",
     "ZC=F": "Maíz",
+}
+
+# Litio como categoría propia: precio real (futuro CME/Fastmarkets, no un ETF
+# de acciones) + la minera NOA Lithium Brines, que cotiza en TSXV.
+LITHIUM_TICKERS = {
+    "LTH=F": "Litio Hidróxido CIF CJK (CME/Fastmarkets)",
+    "NOAL.V": "NOA Lithium Brines (TSXV)",
 }
 
 MEP_API_URL = "https://dolarapi.com/v1/ambito/dolares/bolsa"
@@ -71,9 +73,6 @@ def fmt_pct(val):
 
 @st.cache_data(ttl=CACHE_TTL)
 def get_yf_data(tickers: list[str], labels: dict | None = None) -> pd.DataFrame:
-    """Trae ticker, nombre, precio y variación % vs cierre anterior, usando
-    siempre el histórico diario: si el mercado está cerrado, 'Precio' es el
-    último cierre disponible y 'Variación %' la variación de esa rueda."""
     rows = []
     for t in tickers:
         try:
@@ -100,8 +99,6 @@ def get_yf_data(tickers: list[str], labels: dict | None = None) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL)
 def get_mep() -> dict:
-    """Dólar MEP vía espejo de Ámbito Financiero en dolarapi.com, que trae
-    la variación diaria ya calculada."""
     try:
         r = requests.get(MEP_API_URL, timeout=10)
         r.raise_for_status()
@@ -116,8 +113,6 @@ def get_mep() -> dict:
 
 @st.cache_data(ttl=CACHE_TTL)
 def get_riesgo_pais() -> dict:
-    """Último valor de riesgo país (EMBI+ Argentina, JP Morgan), con variación
-    vs el valor anterior, desde la API pública ArgentinaDatos."""
     try:
         r = requests.get(RIESGO_PAIS_API_URL, timeout=10)
         r.raise_for_status()
@@ -136,12 +131,12 @@ def get_riesgo_pais() -> dict:
 
 
 # ----------------------------------------------------------------------------
-# ESTILOS (compactos, para que todo entre sin scroll)
+# ESTILOS
 # ----------------------------------------------------------------------------
 
 st.markdown("""
 <style>
-    .block-container {padding-top: 1rem; padding-bottom: 0.5rem; max-width: 1500px;}
+    .block-container {padding-top: 0.8rem; padding-bottom: 0.5rem; max-width: 1500px;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     [data-testid="stSidebar"] {display: none;}
@@ -149,10 +144,6 @@ st.markdown("""
 
     .stApp {background-color: #0b0f19;}
 
-    .header-title {
-        font-size: 1.35rem; font-weight: 800; color: #f1f5f9;
-        letter-spacing: 0.5px; margin-bottom: 0;
-    }
     .header-sub {color: #64748b; font-size: 0.75rem; margin-bottom: 0.6rem;}
 
     .card {
@@ -183,7 +174,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Auto-refresh de toda la página cada REFRESH_SECONDS segundos
 st.markdown(f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">', unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
@@ -214,12 +204,11 @@ def render_card(icon: str, title: str, accent: str, rows: list[dict]):
 
 
 # ----------------------------------------------------------------------------
-# HEADER
+# HEADER (sin título, solo hora de actualización y botón manual)
 # ----------------------------------------------------------------------------
 
-col_title, col_btn = st.columns([6, 1])
-with col_title:
-    st.markdown('<div class="header-title">📊 SCREENER DE ACTIVOS FINANCIEROS</div>', unsafe_allow_html=True)
+col_sub, col_btn = st.columns([6, 1])
+with col_sub:
     st.markdown(
         f'<div class="header-sub">Actualizado: {datetime.now().strftime("%d %b %Y, %H:%M")} · '
         f'Auto-refresh cada {REFRESH_SECONDS // 60} min</div>',
@@ -238,15 +227,17 @@ df_ar = get_yf_data(AR_TICKERS)
 df_us = get_yf_data(US_TICKERS, labels=US_LABELS)
 df_crypto = get_yf_data(CRYPTO_TICKERS)
 df_comm = get_yf_data(list(COMMODITY_TICKERS.keys()), labels=COMMODITY_TICKERS)
+df_lithium = get_yf_data(list(LITHIUM_TICKERS.keys()), labels=LITHIUM_TICKERS)
 
 # ----------------------------------------------------------------------------
-# LAYOUT: 3 columnas, distribuidas para que todo entre en una pantalla
+# LAYOUT: 3 columnas
 # ----------------------------------------------------------------------------
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     render_card("🛢️", "COMMODITIES", "#f59e0b", df_comm.to_dict("records"))
+    render_card("⚡", "LITIO", "#a78bfa", df_lithium.to_dict("records"))
 
 with col2:
     render_card("📈", "ACCIONES ARGENTINAS (ADRs)", "#22c55e", df_ar.to_dict("records"))
@@ -255,10 +246,3 @@ with col3:
     render_card("💱", "TIPO DE CAMBIO Y RIESGO PAÍS", "#22d3ee", fx_rows)
     render_card("🇺🇸", "ACCIONES / ÍNDICES EE.UU.", "#818cf8", df_us.to_dict("records"))
     render_card("₿", "CRIPTOMONEDAS", "#f7931a", df_crypto.to_dict("records"))
-
-st.caption(
-    "Fuentes: Yahoo Finance (ADRs, índices, ETFs, cripto, commodities) · "
-    "dolarapi.com / Ámbito (Dólar MEP) · ArgentinaDatos API (Riesgo País, EMBI+ JP Morgan). "
-    "Precio y variación reflejan la última rueda con cierre disponible. "
-    "GGAL, BMA, BBAR, YPF, VIST y CRESY se muestran como ADRs (USD), no como sus equivalentes en pesos de BYMA."
-)
