@@ -123,7 +123,7 @@ if stock_tickers:
     df_stocks = get_yf_data(stock_tickers)
     frames.append(df_stocks)
     st.dataframe(
-        df_stocks.style.applymap(color_variacion, subset=["Variación %"]),
+        df_stocks.style.map(color_variacion, subset=["Variación %"]),
         use_container_width=True, hide_index=True,
     )
 
@@ -132,7 +132,7 @@ if etf_tickers:
     df_etfs = get_yf_data(etf_tickers)
     frames.append(df_etfs)
     st.dataframe(
-        df_etfs.style.applymap(color_variacion, subset=["Variación %"]),
+        df_etfs.style.map(color_variacion, subset=["Variación %"]),
         use_container_width=True, hide_index=True,
     )
 
@@ -142,7 +142,7 @@ if show_commodities:
     df_comm["Nombre"] = df_comm["Ticker"].map(COMMODITY_TICKERS)
     frames.append(df_comm)
     st.dataframe(
-        df_comm.style.applymap(color_variacion, subset=["Variación %"]),
+        df_comm.style.map(color_variacion, subset=["Variación %"]),
         use_container_width=True, hide_index=True,
     )
 
