@@ -4,11 +4,13 @@ Screener personalizado — dashboard estático de una sola pantalla
 Autor: generado con Claude
 """
 
+import re
 import streamlit as st
 import yfinance as yf
 import requests
 import pandas as pd
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 st.set_page_config(
     page_title="Screener de Activos Financieros",
@@ -20,7 +22,7 @@ st.set_page_config(
 # CONFIG
 # ----------------------------------------------------------------------------
 
-REFRESH_SECONDS = 300  # auto-recarga de página. Bajalo a 60 para 1 min (ver nota abajo)
+REFRESH_SECONDS = 300
 CACHE_TTL = 300
 
 AR_TICKERS = ["GGAL", "BMA", "BBAR", "YPF", "VIST", "CRESY"]  # ADRs en NYSE/NASDAQ
@@ -39,15 +41,11 @@ COMMODITY_TICKERS = {
     "ZC=F": "Maíz",
 }
 
-# Litio como categoría propia: precio real (futuro CME/Fastmarkets, no un ETF
-# de acciones) + la minera NOA Lithium Brines, que cotiza en TSXV.
-LITHIUM_TICKERS = {
-    "LTH=F": "Litio Hidróxido CIF CJK (CME/Fastmarkets)",
-    "NOAL.V": "NOA Lithium Brines (TSXV)",
-}
+NOAL_TICKER = "NOAL.V"  # NOA Lithium Brines, TSXV
 
 MEP_API_URL = "https://dolarapi.com/v1/ambito/dolares/bolsa"
 RIESGO_PAIS_API_URL = "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais"
+SMM_LITHIUM_URL = "https://www.metal.com/en/prices/202212050001"  # SMM Battery-Grade Li2CO3 Index, USD/mt
 
 # ----------------------------------------------------------------------------
 # FORMATO NUMÉRICO (es-AR: punto de miles, coma decimal)
@@ -130,6 +128,42 @@ def get_riesgo_pais() -> dict:
         return {"Ticker": "RP", "Nombre": "Riesgo País (no disponible)", "Precio": None, "Variación %": None}
 
 
+@st.cache_data(ttl=CACHE_TTL)
+def get_lithium_carbonate() -> dict:
+    """Precio del carbonato de litio (SMM Battery-Grade Li2CO3 Index, USD/mt),
+    scrapeado de Shanghai Metal Market. Frágil por naturaleza (depende de que
+    SMM no cambie el HTML de la página ni bloquee el request)."""
+    base = {"Ticker": "LI2CO3", "Nombre": "Litio Carbonato (SMM Battery-Grade, USD/mt)"}
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        }
+        r = requests.get(SMM_LITHIUM_URL, headers=headers, timeout=15)
+        r.raise_for_status()
+        text = BeautifulSoup(r.text, "html.parser").get_text(separator=" ")
+        text = re.sub(r"\s+", " ", text)
+
+        patterns = [
+            r"VAT excluded[^\d]{0,20}([\d,]+\.\d+)[^\d]{0,20}USD/mt[^\d\+\-]{0,20}([+-][\d,]+\.\d+)\(([+-]?[\d.]+)%\)",
+            r"Li₂CO₃\s*[≥>=]*\s*99\.5%\s*([\d,]+\.\d+)\s*[+-][\d,\.]+\s*\(([+-]?[\d.]+)%\)",
+            r"SMM Battery-Grade Lithium Carbonate Index[^\d]{0,60}([\d,]+\.\d+)[^\(]{0,20}\(([+-]?[\d.]+)%\)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                groups = m.groups()
+                price = float(groups[0].replace(",", ""))
+                pct = float(groups[-1])
+                return {**base, "Precio": price, "Variación %": pct}
+
+        return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
+    except Exception:
+        return {**base, "Nombre": "Litio Carbonato (no disponible, revisar scraper)", "Precio": None, "Variación %": None}
+
+
 # ----------------------------------------------------------------------------
 # ESTILOS
 # ----------------------------------------------------------------------------
@@ -204,7 +238,7 @@ def render_card(icon: str, title: str, accent: str, rows: list[dict]):
 
 
 # ----------------------------------------------------------------------------
-# HEADER (sin título, solo hora de actualización y botón manual)
+# HEADER
 # ----------------------------------------------------------------------------
 
 col_sub, col_btn = st.columns([6, 1])
@@ -227,7 +261,9 @@ df_ar = get_yf_data(AR_TICKERS)
 df_us = get_yf_data(US_TICKERS, labels=US_LABELS)
 df_crypto = get_yf_data(CRYPTO_TICKERS)
 df_comm = get_yf_data(list(COMMODITY_TICKERS.keys()), labels=COMMODITY_TICKERS)
-df_lithium = get_yf_data(list(LITHIUM_TICKERS.keys()), labels=LITHIUM_TICKERS)
+
+df_noal = get_yf_data([NOAL_TICKER])
+lithium_rows = [get_lithium_carbonate()] + df_noal.to_dict("records")
 
 # ----------------------------------------------------------------------------
 # LAYOUT: 3 columnas
@@ -237,7 +273,7 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     render_card("🛢️", "COMMODITIES", "#f59e0b", df_comm.to_dict("records"))
-    render_card("⚡", "LITIO", "#a78bfa", df_lithium.to_dict("records"))
+    render_card("⚡", "LITIO", "#a78bfa", lithium_rows)
 
 with col2:
     render_card("📈", "ACCIONES ARGENTINAS (ADRs)", "#22c55e", df_ar.to_dict("records"))
